@@ -11,6 +11,9 @@ import serial
 
 DEFAULT_ESP_UDP_PORT = 47268
 DEFAULT_BAUDRATE = 1200
+PACTWARE_BASE_COM = 20
+MIN_KIT_ID = 0
+MAX_KIT_ID = 8
 READ_SIZE = 256
 
 
@@ -24,6 +27,12 @@ def read_kit_id(root: Path) -> str:
     if not config.read(ini_path, encoding="utf-8"):
         raise FileNotFoundError(f"Nao consegui ler {ini_path}")
     return config.get("data", "kitId", fallback="0").strip()
+
+
+def kit_ports(kit_id: int) -> tuple[str, str]:
+    if kit_id < MIN_KIT_ID or kit_id > MAX_KIT_ID:
+        raise ValueError(f"kitId deve estar entre {MIN_KIT_ID} e {MAX_KIT_ID}")
+    return f"CNCA{kit_id}", f"COM{PACTWARE_BASE_COM + kit_id}"
 
 
 def local_ip_for_remote(host: str, port: int) -> str:
@@ -94,12 +103,18 @@ def serial_to_udp(
 
 def parse_args() -> argparse.Namespace:
     root = project_root()
-    kit_id = read_kit_id(root)
-    default_serial = f"CNCA{kit_id}"
-    default_host = f"iikit{kit_id}.local"
+    ini_kit_id = int(read_kit_id(root))
+    default_serial, default_pactware_port = kit_ports(ini_kit_id)
+    default_host = f"iikit{ini_kit_id}.local"
 
     parser = argparse.ArgumentParser(
         description="Ponte HART entre a porta serial virtual do PACTware e o UDP do ESP32."
+    )
+    parser.add_argument(
+        "--kit-id",
+        type=int,
+        default=ini_kit_id,
+        help=f"ID do kit. Padrao: {ini_kit_id} lido do platformio.ini",
     )
     parser.add_argument("--serial", default=default_serial, help=f"Porta serial virtual. Padrao: {default_serial}")
     parser.add_argument("--host", default=default_host, help=f"Host/IP do ESP32. Padrao: {default_host}")
@@ -107,7 +122,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baudrate", type=int, default=DEFAULT_BAUDRATE, help="Baudrate serial.")
     parser.add_argument("--listen-port", type=int, default=0, help="Porta UDP local. 0 escolhe automaticamente.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Mostra bytes trafegando em hexadecimal.")
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if args.kit_id != ini_kit_id:
+        serial_from_kit, default_pactware_port = kit_ports(args.kit_id)
+        if "--serial" not in sys.argv:
+            args.serial = serial_from_kit
+        if "--host" not in sys.argv:
+            args.host = f"iikit{args.kit_id}.local"
+
+    args.pactware_port = default_pactware_port
+    return args
 
 
 def main() -> int:
@@ -125,8 +150,8 @@ def main() -> int:
     try:
         ser = open_serial(args.serial, args.baudrate)
     except serial.SerialException as exc:
-        print(f"Nao consegui abrir {args.serial} em 1200 SERIAL_8O1: {exc}")
-        print("Confira se a porta virtual existe e se o PACTware esta usando a outra ponta do par.")
+        print(f"Nao consegui abrir {args.serial} em {args.baudrate} SERIAL_8O1: {exc}")
+        print(f"Confira se a porta virtual existe e se o PACTware esta configurado na outra ponta: {args.pactware_port}.")
         return 1
 
     stop = threading.Event()
@@ -134,6 +159,7 @@ def main() -> int:
     tx_thread = threading.Thread(target=serial_to_udp, args=(sock, ser, esp_addr, stop, args.verbose), daemon=True)
 
     print(f"Serial aberta: {args.serial} @ {args.baudrate} SERIAL_8O1")
+    print(f"Configure o PACTware na porta: {args.pactware_port}")
     print(f"UDP local: {local_ip}:{local_port}")
     print(f"ESP32: {args.host}:{args.udp_port}")
     print("Ponte ativa. Pressione Ctrl+C para sair.")
