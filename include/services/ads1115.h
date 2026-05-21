@@ -1,3 +1,6 @@
+#ifndef __ADS1X15_H
+#define __ADS1X15_H
+
 /**
  * @file ADS1115_c.h
  * @brief Classe para simplificar o uso do ADS1115 com o Adafruit_ADS1X15.
@@ -15,14 +18,14 @@
  * Esta classe encapsula o funcionamento do ADS1115, definindo o ganho padrão
  * e oferecendo um método de leitura direta de canais analógicos.
  */
-class ADS1115_c : protected Adafruit_ADS1115 {
+class ADS1115 : protected Adafruit_ADS1115 {
 public:
     /**
      * @brief Construtor padrão.
      *
      * Inicializa a classe base Adafruit_ADS1115.
      */
-    ADS1115_c() : Adafruit_ADS1115() {}
+    ADS1115() : Adafruit_ADS1115() {}
 
     /**
      * @brief Inicializa o dispositivo ADS1115.
@@ -44,4 +47,27 @@ public:
     uint16_t analogRead(uint8_t channel) {
         return ((Adafruit_ADS1115 *)this)->readADC_SingleEnded(channel);
     }
+
+    uint16_t analogReadPot1(void)
+    {
+        return analogRead(1);
+    }
+
+    uint16_t analogReadPot2(void)
+    {
+        return analogRead(0);
+    }
+
+    uint16_t analogRead4a20_1(void)
+    {
+        return analogRead(3);
+    }
+
+    uint16_t analogRead4a20_2(void)
+    {
+        return analogRead(2);
+    }    
 };
+
+inline ADS1115 ads1115; ///< Instância global do ADC ADS1115.
+#endif 
