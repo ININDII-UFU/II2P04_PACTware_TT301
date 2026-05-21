@@ -1,0 +1,7 @@
+Bridge anterior encerrada: 21560
+UDP local: 127.0.0.1:54538
+ESP32: 127.0.0.1:47268
+CONNECT enviado para a ESP32.
+Serial aberta: CNCA2 @ 1200 SERIAL_8O1
+Configure o PACTware na porta: COM22
+Ponte serial/UDP ativa. Pressione Ctrl+C para sair.

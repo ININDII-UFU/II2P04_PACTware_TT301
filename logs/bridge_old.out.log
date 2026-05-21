@@ -1,0 +1,2 @@
+Nao consegui abrir CNCA1 em 1200 SERIAL_8O1: CNCA1: could not open port 'CNCA1': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2) | \\.\CNCA1: could not open port '\\\\.\\CNCA1': PermissionError(13, 'Access is denied.', None, 5)
+Essa porta provavelmente ja esta aberta por outra bridge ou outro programa.

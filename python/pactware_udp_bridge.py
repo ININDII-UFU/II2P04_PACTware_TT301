@@ -1,10 +1,14 @@
 import argparse
 import configparser
+import json
+import os
 import socket
+import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+import shlex
 
 import serial
 
@@ -35,6 +39,54 @@ def kit_ports(kit_id: int) -> tuple[str, str]:
     return f"CNCA{kit_id}", f"COM{PACTWARE_BASE_COM + kit_id}"
 
 
+def available_serial_ports() -> set[str]:
+    ports: set[str] = set()
+    if sys.platform.startswith("win"):
+        ps_script = (
+            "Get-CimInstance Win32_SerialPort | "
+            "Select-Object -ExpandProperty DeviceID | ConvertTo-Json -Compress"
+        )
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_script],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            output = result.stdout.strip()
+            if output:
+                parsed = json.loads(output)
+                if isinstance(parsed, str):
+                    parsed = [parsed]
+                ports.update(str(port).upper() for port in parsed)
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+            pass
+
+    if not ports:
+        from serial.tools import list_ports
+
+        ports.update(port.device.upper() for port in list_ports.comports())
+
+    return ports
+
+
+def validate_serial_pair(args: argparse.Namespace) -> None:
+    ports = available_serial_ports()
+    missing = []
+    if args.serial.upper() not in ports:
+        missing.append(args.serial)
+    if args.pactware_port.upper() not in ports:
+        missing.append(args.pactware_port)
+    if missing:
+        known = ", ".join(sorted(ports))
+        raise serial.SerialException(
+            "Porta virtual nao encontrada: "
+            + ", ".join(missing)
+            + f". Portas detectadas: {known}"
+        )
+
+
 def local_ip_for_remote(host: str, port: int) -> str:
     probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -49,18 +101,36 @@ def hex_dump(data: bytes) -> str:
 
 
 def open_serial(port: str, baudrate: int) -> serial.Serial:
-    return serial.Serial(
-        port=port,
-        baudrate=baudrate,
-        bytesize=serial.EIGHTBITS,
-        parity=serial.PARITY_ODD,
-        stopbits=serial.STOPBITS_ONE,
-        timeout=0.05,
-        write_timeout=1,
-    )
+    errors = []
+    candidates = [port]
+    if sys.platform.startswith("win") and not port.startswith("\\\\.\\"):
+        candidates.append(f"\\\\.\\{port}")
+
+    for candidate in candidates:
+        try:
+            return serial.Serial(
+                port=candidate,
+                baudrate=baudrate,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_ODD,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=0.05,
+                write_timeout=1,
+            )
+        except serial.SerialException as exc:
+            errors.append(f"{candidate}: {exc}")
+
+    raise serial.SerialException(" | ".join(errors))
 
 
-def udp_to_serial(sock: socket.socket, ser: serial.Serial, stop: threading.Event, verbose: bool) -> None:
+def udp_to_serial(
+    sock: socket.socket,
+    ser: serial.Serial,
+    stop: threading.Event,
+    verbose: bool,
+    pactware_port: str,
+) -> None:
+    warned_timeout = False
     while not stop.is_set():
         try:
             data, _addr = sock.recvfrom(2048)
@@ -75,7 +145,22 @@ def udp_to_serial(sock: socket.socket, ser: serial.Serial, stop: threading.Event
             continue
 
         if data:
-            ser.write(data)
+            try:
+                ser.write(data)
+                warned_timeout = False
+            except serial.SerialTimeoutException:
+                if not warned_timeout:
+                    print(
+                        "Timeout escrevendo na serial virtual. "
+                        f"Confira se o PACTware esta conectado em {pactware_port} "
+                        "e se nenhum outro programa esta usando essa porta."
+                    )
+                    warned_timeout = True
+                continue
+            except serial.SerialException as exc:
+                print(f"Erro escrevendo na serial virtual: {exc}")
+                stop.set()
+                break
             if verbose:
                 print(f"UDP -> SERIAL ({len(data)}): {hex_dump(data)}")
 
@@ -104,7 +189,10 @@ def serial_to_udp(
 def parse_args() -> argparse.Namespace:
     root = project_root()
     ini_kit_id = int(read_kit_id(root))
-    default_serial, default_pactware_port = kit_ports(ini_kit_id)
+    try:
+        default_serial, default_pactware_port = kit_ports(ini_kit_id)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
     default_host = f"iikit{ini_kit_id}.local"
 
     parser = argparse.ArgumentParser(
@@ -121,11 +209,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--udp-port", type=int, default=DEFAULT_ESP_UDP_PORT, help="Porta UDP do ESP32.")
     parser.add_argument("--baudrate", type=int, default=DEFAULT_BAUDRATE, help="Baudrate serial.")
     parser.add_argument("--listen-port", type=int, default=0, help="Porta UDP local. 0 escolhe automaticamente.")
+    parser.add_argument(
+        "--keep-existing",
+        action="store_true",
+        help="Nao encerra outras instancias do pactware_udp_bridge.py antes de iniciar.",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Mostra bytes trafegando em hexadecimal.")
     args = parser.parse_args()
 
     if args.kit_id != ini_kit_id:
-        serial_from_kit, default_pactware_port = kit_ports(args.kit_id)
+        try:
+            serial_from_kit, default_pactware_port = kit_ports(args.kit_id)
+        except ValueError as exc:
+            parser.error(str(exc))
         if "--serial" not in sys.argv:
             args.serial = serial_from_kit
         if "--host" not in sys.argv:
@@ -135,9 +231,115 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def command_targets_same_bridge(command_line: str, args: argparse.Namespace, ini_kit_id: int) -> bool:
+    try:
+        parts = shlex.split(command_line, posix=False)
+    except ValueError:
+        parts = command_line.split()
+
+    requested_serial = args.serial.upper()
+    requested_kit = str(args.kit_id)
+
+    for index, part in enumerate(parts):
+        cleaned = part.strip("\"'").upper()
+        if cleaned == requested_serial:
+            return True
+        if cleaned == "--SERIAL" and index + 1 < len(parts):
+            if parts[index + 1].strip("\"'").upper() == requested_serial:
+                return True
+        if cleaned.startswith("--SERIAL="):
+            if cleaned.split("=", 1)[1].strip("\"'").upper() == requested_serial:
+                return True
+        if cleaned == "--KIT-ID" and index + 1 < len(parts):
+            if parts[index + 1].strip("\"'") == requested_kit:
+                return True
+        if cleaned.startswith("--KIT-ID="):
+            if cleaned.split("=", 1)[1].strip("\"'") == requested_kit:
+                return True
+
+    has_explicit_serial = any(part.strip("\"'").upper().startswith("--SERIAL") for part in parts)
+    has_explicit_kit = any(part.strip("\"'").upper().startswith("--KIT-ID") for part in parts)
+    return not has_explicit_serial and not has_explicit_kit and args.kit_id == ini_kit_id
+
+
+def kill_existing_bridges(args: argparse.Namespace) -> None:
+    if not sys.platform.startswith("win"):
+        return
+
+    ps_script = (
+        "Get-CimInstance Win32_Process | "
+        "Where-Object { $_.Name -like 'python*.exe' -and $_.CommandLine -like '*pactware_udp_bridge.py*' } | "
+        "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_script],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+
+    output = result.stdout.strip()
+    if not output:
+        return
+
+    try:
+        processes = json.loads(output)
+    except json.JSONDecodeError:
+        return
+    if isinstance(processes, dict):
+        processes = [processes]
+
+    current_pid = os.getpid()
+    ini_kit_id = int(read_kit_id(project_root()))
+    killed = []
+    for proc in processes:
+        pid = int(proc.get("ProcessId", 0) or 0)
+        if pid <= 0 or pid == current_pid:
+            continue
+        command_line = str(proc.get("CommandLine", ""))
+        if not command_targets_same_bridge(command_line, args, ini_kit_id):
+            continue
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/F"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            killed.append(pid)
+        except (OSError, subprocess.SubprocessError):
+            continue
+
+    if killed:
+        print("Bridge anterior encerrada: " + ", ".join(str(pid) for pid in killed))
+        time.sleep(0.5)
+
+
 def main() -> int:
     args = parse_args()
     esp_addr = (args.host, args.udp_port)
+
+    if not args.keep_existing:
+        kill_existing_bridges(args)
+
+    try:
+        validate_serial_pair(args)
+    except serial.SerialException as exc:
+        print(exc)
+        return 1
+
+    try:
+        ser = open_serial(args.serial, args.baudrate)
+    except serial.SerialException as exc:
+        print(f"Nao consegui abrir {args.serial} em {args.baudrate} SERIAL_8O1: {exc}")
+        if "Access is denied" in str(exc) or "PermissionError" in str(exc):
+            print("Essa porta provavelmente ja esta aberta por outra bridge ou outro programa.")
+        return 1
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(0.1)
@@ -146,38 +348,36 @@ def main() -> int:
     local_ip = local_ip_for_remote(args.host, args.udp_port)
     local_port = sock.getsockname()[1]
     connect_msg = f"CONNECT:{local_ip}:{local_port}".encode("ascii")
+    disconnect_msg = f"DISCONNECT:{local_ip}:{local_port}".encode("ascii")
 
-    try:
-        ser = open_serial(args.serial, args.baudrate)
-    except serial.SerialException as exc:
-        print(f"Nao consegui abrir {args.serial} em {args.baudrate} SERIAL_8O1: {exc}")
-        print(f"Confira se a porta virtual existe e se o PACTware esta configurado na outra ponta: {args.pactware_port}.")
-        return 1
+    print(f"UDP local: {local_ip}:{local_port}")
+    print(f"ESP32: {args.host}:{args.udp_port}")
+    sock.sendto(connect_msg, esp_addr)
+    print("CONNECT enviado para a ESP32.")
 
     stop = threading.Event()
-    rx_thread = threading.Thread(target=udp_to_serial, args=(sock, ser, stop, args.verbose), daemon=True)
+    rx_thread = threading.Thread(
+        target=udp_to_serial,
+        args=(sock, ser, stop, args.verbose, args.pactware_port),
+        daemon=True,
+    )
     tx_thread = threading.Thread(target=serial_to_udp, args=(sock, ser, esp_addr, stop, args.verbose), daemon=True)
 
     print(f"Serial aberta: {args.serial} @ {args.baudrate} SERIAL_8O1")
     print(f"Configure o PACTware na porta: {args.pactware_port}")
-    print(f"UDP local: {local_ip}:{local_port}")
-    print(f"ESP32: {args.host}:{args.udp_port}")
-    print("Ponte ativa. Pressione Ctrl+C para sair.")
-
-    sock.sendto(connect_msg, esp_addr)
+    print("Ponte serial/UDP ativa. Pressione Ctrl+C para sair.")
     rx_thread.start()
     tx_thread.start()
 
     try:
         while not stop.is_set():
             time.sleep(1)
-            sock.sendto(connect_msg, esp_addr)
     except KeyboardInterrupt:
         print("\nEncerrando...")
     finally:
         stop.set()
         try:
-            sock.sendto(f"DISCONNECT:{local_ip}:{local_port}".encode("ascii"), esp_addr)
+            sock.sendto(disconnect_msg, esp_addr)
         except OSError:
             pass
         ser.close()

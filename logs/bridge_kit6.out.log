@@ -1,0 +1,6 @@
+UDP local: 127.0.0.1:54531
+ESP32: 127.0.0.1:47268
+CONNECT enviado para a ESP32.
+Serial aberta: CNCA6 @ 1200 SERIAL_8O1
+Configure o PACTware na porta: COM26
+Ponte serial/UDP ativa. Pressione Ctrl+C para sair.
