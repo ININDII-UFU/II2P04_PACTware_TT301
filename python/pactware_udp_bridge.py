@@ -15,6 +15,7 @@ import serial
 
 DEFAULT_ESP_UDP_PORT = 47268
 DEFAULT_BAUDRATE = 1200
+CONNECT_INTERVAL = 5.0
 PACTWARE_BASE_COM = 20
 MIN_KIT_ID = 0
 MAX_KIT_ID = 8
@@ -36,7 +37,7 @@ def read_kit_id(root: Path) -> str:
 def kit_ports(kit_id: int) -> tuple[str, str]:
     if kit_id < MIN_KIT_ID or kit_id > MAX_KIT_ID:
         raise ValueError(f"kitId deve estar entre {MIN_KIT_ID} e {MAX_KIT_ID}")
-    return f"CNCA{kit_id}", f"COM{PACTWARE_BASE_COM + kit_id}"
+    return f"CNCB{kit_id}", f"COM{PACTWARE_BASE_COM + kit_id}"
 
 
 def available_serial_ports() -> set[str]:
@@ -63,10 +64,9 @@ def available_serial_ports() -> set[str]:
         except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
             pass
 
-    if not ports:
-        from serial.tools import list_ports
+    from serial.tools import list_ports
 
-        ports.update(port.device.upper() for port in list_ports.comports())
+    ports.update(port.device.upper() for port in list_ports.comports())
 
     return ports
 
@@ -126,6 +126,7 @@ def open_serial(port: str, baudrate: int) -> serial.Serial:
 def udp_to_serial(
     sock: socket.socket,
     ser: serial.Serial,
+    esp_addr: tuple[str, int],
     stop: threading.Event,
     verbose: bool,
     pactware_port: str,
@@ -133,11 +134,14 @@ def udp_to_serial(
     warned_timeout = False
     while not stop.is_set():
         try:
-            data, _addr = sock.recvfrom(2048)
+            data, addr = sock.recvfrom(2048)
         except socket.timeout:
             continue
         except OSError:
             break
+
+        if addr != esp_addr:
+            continue
 
         if data.startswith(b"CONNECT:") or data.startswith(b"DISCONNECT:"):
             if verbose:
@@ -181,7 +185,12 @@ def serial_to_udp(
             break
 
         if data:
-            sock.sendto(data, esp_addr)
+            try:
+                sock.sendto(data, esp_addr)
+            except OSError as exc:
+                print(f"Erro enviando UDP para o ESP32: {exc}")
+                stop.set()
+                break
             if verbose:
                 print(f"SERIAL -> UDP ({len(data)}): {hex_dump(data)}")
 
@@ -322,7 +331,12 @@ def kill_existing_bridges(args: argparse.Namespace) -> None:
 
 def main() -> int:
     args = parse_args()
-    esp_addr = (args.host, args.udp_port)
+    try:
+        esp_addr = (socket.gethostbyname(args.host), args.udp_port)
+    except OSError as exc:
+        print(f"Nao consegui resolver o endereco do ESP32 ({args.host}): {exc}")
+        print("Conecte o computador ao Wi-Fi do ESP32 ou informe o IP com --host.")
+        return 1
 
     if not args.keep_existing:
         kill_existing_bridges(args)
@@ -358,7 +372,7 @@ def main() -> int:
     stop = threading.Event()
     rx_thread = threading.Thread(
         target=udp_to_serial,
-        args=(sock, ser, stop, args.verbose, args.pactware_port),
+        args=(sock, ser, esp_addr, stop, args.verbose, args.pactware_port),
         daemon=True,
     )
     tx_thread = threading.Thread(target=serial_to_udp, args=(sock, ser, esp_addr, stop, args.verbose), daemon=True)
@@ -371,7 +385,9 @@ def main() -> int:
 
     try:
         while not stop.is_set():
-            time.sleep(1)
+            if stop.wait(CONNECT_INTERVAL):
+                break
+            sock.sendto(connect_msg, esp_addr)
     except KeyboardInterrupt:
         print("\nEncerrando...")
     finally:

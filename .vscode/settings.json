@@ -57,5 +57,8 @@
         "xhash": "cpp",
         "xstring": "cpp",
         "xutility": "cpp"
-    }
+    },
+    "python.defaultInterpreterPath": "C:\\ProgramData\\anaconda3\\python.exe",
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "python-envs.defaultPackageManager": "ms-python.python:pip"
 }

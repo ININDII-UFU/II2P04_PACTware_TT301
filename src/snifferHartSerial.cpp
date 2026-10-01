@@ -2,7 +2,7 @@
 #include <WiFi.h>
 
 // --- CONFIGURE SEU WIFI ---
-const char *ssid = "APJosue";
+const char *ssid = "Inova";
 const char *password = "josue32154538";
 const IPAddress local_ip(200, 19, 148, 112);
 const IPAddress gateway(200, 19, 148, 1);
@@ -32,6 +32,7 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.config(local_ip, gateway, subnet);
   WiFi.begin(ssid, password);
+  
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
   }

@@ -95,6 +95,29 @@ Para isso, acesse o Moodle e clique no protocolo desejado na área de **'LINKS I
 
 ---
 
+## Ponte HART Wi-Fi para PACTware
+
+O firmware `src/hartWifi.cpp` conecta o ESP32 a rede Wi-Fi configurada no codigo e
+encaminha os bytes HART entre UDP e a UART2 do ESP32 (RX GPIO 16, TX GPIO 17,
+1200 baud, 8O1). O modem HART liga-se a essa UART. Sem uma sessao UDP ativa,
+a USB funciona como porta HART em 1200 baud, 8O1. Ao receber `CONNECT` da
+bridge, o transporte muda para UDP; `DISCONNECT`, perda do Wi-Fi ou 15 segundos
+sem `CONNECT` devolvem o fluxo a USB.
+
+1. Grave o firmware pela USB com `platformio run -e esp32 -t upload`.
+2. Conecte o computador a mesma rede Wi-Fi configurada em `src/hartWifi.cpp`.
+   O IP do ESP32 aparece no display apos a conexao.
+3. Crie no COM0COM o par `CNCB<kitId>` / `COM<20+kitId>` e execute
+   `python python/pactware_udp_bridge.py`.
+4. No PACTware, selecione `COM<20+kitId>` em 1200 baud, 8 bits, paridade
+   impar e 1 stop bit.
+
+O script procura `iikit<kitId>.local` via mDNS. Se o Windows nao resolver esse
+nome, informe o IP mostrado no display com `--host <IP>`. Para usar a USB
+diretamente, selecione a porta COM do ESP32 no PACTware em 1200 baud, 8O1.
+
+---
+
 # Portable HART-IP Commands
 
 From UniversalCommandList.json
