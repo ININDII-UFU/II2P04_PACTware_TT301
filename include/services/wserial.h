@@ -9,13 +9,14 @@
 #include <string>
 #include <cstring>
 
+#define WSERIAL_NEWLINE "\r\n"
 class WSerial {
 public:
     using BytesCallback = std::function<void(const uint8_t *, size_t)>;
     using TextCallback = std::function<void(std::string)>;
 
-    void begin(unsigned long baudrate = 115200, uint32_t config = SERIAL_8N1,
-               uint16_t udpPort = 47268) {
+    void begin(unsigned long baudrate = 115200, uint16_t udpPort = 47268,
+               uint32_t config = SERIAL_8N1) {
         Serial.begin(baudrate, config);
         _listenPort = udpPort;
         if (udpPort && WiFi.status() == WL_CONNECTED) startListen();
@@ -87,10 +88,54 @@ public:
         return write(reinterpret_cast<const uint8_t *>(data), len);
     }
     template <typename T> void print(const T &value) { send(String(value)); }
+    void print(const std::string &value) { send(String(value.c_str())); }
     template <typename T> void println(const T &value) {
-        send(String(value) + "\r\n");
+        send(String(value) + WSERIAL_NEWLINE);
     }
-    void println() { send("\r\n"); }
+    void println(const std::string &value) {
+        send(String(value.c_str()) + WSERIAL_NEWLINE);
+    }
+    void println() { send(WSERIAL_NEWLINE); }
+
+    // === plot com timestamp explícito ===
+    template <typename T>
+    void plot(const char *varName, TickType_t x, T y, const char *unit = nullptr) {
+        String str(">");
+        str += varName; str += ":";
+        uint32_t ts_ms = (uint32_t)x;
+        if (ts_ms < 100000) ts_ms = millis();
+        str += String(ts_ms); str += ":"; str += String(y);
+        if (unit && unit[0]) { str += "\xC2\xA7"; str += unit; }
+        str += WSERIAL_NEWLINE;
+        send(str);
+    }
+
+    // === plot simples (timestamp automático) ===
+    template <typename T>
+    void plot(const char *varName, T y, const char *unit = nullptr) {
+        plot(varName, (TickType_t)xTaskGetTickCount(), y, unit);
+    }
+
+    // === plot de array com dt fixo ===
+    template <typename T>
+    void plot(const char *varName, uint32_t dt_ms, const T* y, size_t ylen, const char *unit = nullptr) {
+        String str(">");
+        str += varName; str += ":";
+        for (size_t i = 0; i < ylen; i++) {
+            str += String((uint32_t)_base_ms); str += ":";
+            str += String((double)y[i], 6);
+            _base_ms += dt_ms;
+            if (i < ylen - 1) str += ";";
+        }
+        if (unit) { str += "\xC2\xA7"; str += unit; }
+        str += WSERIAL_NEWLINE;
+        send(str);
+    }
+
+    void log(const char *text, uint32_t ts_ms = 0) {
+        if (ts_ms == 0) ts_ms = millis();
+        send(String(ts_ms) + ":" + String(text ? text : "") + WSERIAL_NEWLINE);
+    }
 
 private:
     void send(const String &text) {
@@ -170,6 +215,7 @@ private:
     IPAddress _peerIP;
     uint16_t _peerPort = 0;
     uint16_t _listenPort = 0;
+    uint32_t _base_ms = 0;
     uint32_t _lastConnect = 0;
     uint32_t _lastRetry = 0;
     bool _linked = false;

@@ -24,7 +24,7 @@ void receivedFunc(const uint8_t *data, size_t len) {
 void setup() {
   hartSerial.begin(1200, SERIAL_8O1, HART_RX_PIN, HART_TX_PIN);
   wserial.onBytesReceived(receivedFunc);
-  wserial.begin(1200, SERIAL_8O1, 47268);
+  wserial.begin(1200, 47268, SERIAL_8O1);
   WiFi.begin(ssid, password);
 
   if (disp.begin(PIN_SDA, PIN_SCL)) {
