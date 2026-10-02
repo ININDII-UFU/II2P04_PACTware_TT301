@@ -37,10 +37,11 @@ void setup() {
 
 void loop() {
   if (WiFi.status() == WL_CONNECTED && !networkServicesStarted) {
-    MDNS.begin(KIT_HOSTNAME);
-    ArduinoOTA.setHostname(KIT_HOSTNAME);
-    ArduinoOTA.begin();
     networkServicesStarted = true;
+    MDNS.begin(KIT_HOSTNAME);
+    ArduinoOTA
+      .setHostname(KIT_HOSTNAME)
+      .begin();
     disp.setText(1, (WiFi.localIP().toString() + " ID:" + String(KIT_ID)).c_str());
   }
   if (networkServicesStarted) ArduinoOTA.handle();
